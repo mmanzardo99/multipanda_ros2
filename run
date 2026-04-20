@@ -9,14 +9,12 @@ set -e
 # *********************************************************
 
 # Setup Paths
-REPO_PATH=$(git rev-parse --show-toplevel)
+REPO_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel)
 REPO_NAME=$(basename "$REPO_PATH")
 
 # ==============================================================================
 # 1. Path and Identity Setup
 # ==============================================================================
-REPO_PATH=$(git rev-parse --show-toplevel)
-REPO_NAME=$(basename "$REPO_PATH")
 IMAGE_NAME="build-env"
 CONTAINER_NAME="multipanda-container"
 
@@ -63,8 +61,8 @@ fi
 # 4. Container Execution
 # ==============================================================================
 if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
-    echo "$CONTAINER_NAME is already running."
-else
+        echo "$CONTAINER_NAME is already running."
+    else
     echo "Launching $CONTAINER_NAME..."
     
     docker run -d \
