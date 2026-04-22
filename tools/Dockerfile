@@ -143,6 +143,7 @@ RUN apt-get update -y && apt-get install -y --allow-unauthenticated \
     ros-humble-joy \
     ros-humble-teleop-twist-joy \
     ros-humble-plotjuggler-ros \
+    ros-humble-pinocchio \
     && rm -rf /var/lib/apt/lists/*
 
 # *********************************************************

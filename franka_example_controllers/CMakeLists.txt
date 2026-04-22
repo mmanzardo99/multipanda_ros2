@@ -26,6 +26,7 @@ find_package(franka_msgs REQUIRED)
 find_package(multi_mode_control_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(ruckig REQUIRED)
+find_package(pinocchio REQUIRED)
 
 add_library(
         ${PROJECT_NAME}
