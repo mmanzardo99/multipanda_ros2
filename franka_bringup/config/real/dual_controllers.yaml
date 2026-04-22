@@ -12,7 +12,7 @@ controller_manager:
       type: franka_robot_state_broadcaster/FrankaRobotModelBroadcaster
     franka_right_robot_model_broadcaster:
       type: franka_robot_state_broadcaster/FrankaRobotModelBroadcaster
-    dual_joint_impedance_example_controller:
+    dual_collision_controller_torque_release:
       type: franka_example_controllers/MultiJointImpedanceExampleController
     dual_joint_velocity_example_controller:
       type: franka_example_controllers/DualJointVelocityExampleController
@@ -37,7 +37,7 @@ franka_right_robot_model_broadcaster:
     arm_id: right
     frequency: 30
     
-dual_joint_impedance_example_controller:
+dual_collision_controller_torque_release:
   ros__parameters:
     arm_count: 2
     arm_1:

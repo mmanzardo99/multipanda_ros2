@@ -1,18 +1,4 @@
-// Copyright (c) 2021 Franka Emika GmbH
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#include <franka_example_controllers/comless/joint_impedance_example_controller.hpp>
+#include <franka_example_controllers/comless/collision_controller_torque_release.hpp>
 
 #include <cassert>
 #include <cmath>
@@ -24,7 +10,7 @@
 namespace franka_example_controllers {
 
 controller_interface::InterfaceConfiguration
-JointImpedanceExampleController::command_interface_configuration() const {
+CollisionControllerTorqueRelease::command_interface_configuration() const {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for (int i = 1; i <= num_joints; ++i) {
@@ -34,7 +20,7 @@ JointImpedanceExampleController::command_interface_configuration() const {
 }
 
 controller_interface::InterfaceConfiguration
-JointImpedanceExampleController::state_interface_configuration() const {
+CollisionControllerTorqueRelease::state_interface_configuration() const {
   controller_interface::InterfaceConfiguration config;
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for (int i = 1; i <= num_joints; ++i) {
@@ -47,32 +33,50 @@ JointImpedanceExampleController::state_interface_configuration() const {
   return config;
 }
 
-controller_interface::return_type JointImpedanceExampleController::update(
+controller_interface::return_type CollisionControllerTorqueRelease::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
   updateJointStates();
-  Vector7d q_goal = initial_q_;
-  auto time = this->get_node()->now() - start_time_;
-  double delta_angle = M_PI / 8.0 * (1 - std::cos(M_PI / 2.5 * time.seconds()));
-  q_goal(3) += delta_angle;
-  q_goal(4) += delta_angle;
   
   const double kAlpha = 0.99;
   dq_filtered_ = (1 - kAlpha) * dq_filtered_ + kAlpha * dq_;
   Eigen::Map<const Vector7d> coriolis(franka_robot_model_->getCoriolisForceVector().data());
-  Vector7d tau_d_calculated =
-      k_gains_.cwiseProduct(q_goal - q_) + d_gains_.cwiseProduct(-dq_filtered_) + coriolis;
+  
+  Vector7d tau_d_calculated;
+
+  if (trajectory_running_) {
+    if (current_waypoint_index_ < trajectory_buffer_.size()) {
+      auto& waypoint = trajectory_buffer_[current_waypoint_index_];
+      q_d_ = waypoint.q;
+      dq_d_ = waypoint.dq;
+      current_waypoint_index_++;
+      
+      tau_d_calculated = k_gains_.cwiseProduct(q_d_ - q_) + d_gains_.cwiseProduct(dq_d_ - dq_filtered_) + coriolis;
+    } else {
+      trajectory_running_ = false;
+      RCLCPP_INFO(get_node()->get_logger(), "Final position reached. Trajectory execution finished.");
+      tau_d_calculated = coriolis;
+    }
+  } else {
+    tau_d_calculated = coriolis;
+  }
+
   for (int i = 0; i < num_joints; ++i) {
     command_interfaces_[i].set_value(tau_d_calculated(i));
   }
   return controller_interface::return_type::OK;
 }
 
-CallbackReturn JointImpedanceExampleController::on_init() {
+CallbackReturn CollisionControllerTorqueRelease::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
     auto_declare<std::vector<double>>("k_gains", {});
     auto_declare<std::vector<double>>("d_gains", {});
+
+    goal_service_ = get_node()->create_service<multi_mode_control_msgs::srv::JointCollisionGoal>(
+        "~/joint_collision_goal",
+        std::bind(&CollisionControllerTorqueRelease::goalCallback, this, std::placeholders::_1, std::placeholders::_2)
+    );
   } catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
     return CallbackReturn::ERROR;
@@ -80,7 +84,7 @@ CallbackReturn JointImpedanceExampleController::on_init() {
   return CallbackReturn::SUCCESS;
 }
 
-CallbackReturn JointImpedanceExampleController::on_configure(
+CallbackReturn CollisionControllerTorqueRelease::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   arm_id_ = get_node()->get_parameter("arm_id").as_string();
   franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
@@ -111,19 +115,21 @@ CallbackReturn JointImpedanceExampleController::on_configure(
     k_gains_(i) = k_gains.at(i);
   }
   dq_filtered_.setZero();
+
   return CallbackReturn::SUCCESS;
 }
 
-CallbackReturn JointImpedanceExampleController::on_activate(
+CallbackReturn CollisionControllerTorqueRelease::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   updateJointStates();
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
-  initial_q_ = q_;
-  start_time_ = this->get_node()->now();
+  q_d_ = q_;
+  dq_d_.setZero();
+  trajectory_running_ = false;
   return CallbackReturn::SUCCESS;
 }
 
-void JointImpedanceExampleController::updateJointStates() {
+void CollisionControllerTorqueRelease::updateJointStates() {
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
     const auto& velocity_interface = state_interfaces_.at(2 * i + 1);
@@ -136,8 +142,70 @@ void JointImpedanceExampleController::updateJointStates() {
   }
 }
 
+void CollisionControllerTorqueRelease::goalCallback(
+    const std::shared_ptr<multi_mode_control_msgs::srv::JointCollisionGoal::Request> request,
+    std::shared_ptr<multi_mode_control_msgs::srv::JointCollisionGoal::Response> response) {
+  
+  if (trajectory_running_) {
+    response->success = false;
+    response->message = "A trajectory is already in execution.";
+    return;
+  }
+
+  ruckig::InputParameter<7> ruckig_input;
+  for (int i = 0; i < num_joints; ++i) {
+    ruckig_input.current_position[i] = q_(i);
+    ruckig_input.current_velocity[i] = 0.0;
+    ruckig_input.current_acceleration[i] = 0.0;
+
+    ruckig_input.target_position[i] = request->q[i];
+    ruckig_input.target_velocity[i] = request->dq[i];
+    ruckig_input.target_acceleration[i] = request->qdd[i];
+
+    ruckig_input.max_velocity[i] = 2.0;
+    ruckig_input.max_acceleration[i] = 1.0;
+    ruckig_input.max_jerk[i] = 10.0;
+  }
+
+  if (request->duration > 0.0) {
+      ruckig_input.minimum_duration = request->duration;
+      ruckig_input.duration_discretization = ruckig::DurationDiscretization::Continuous;
+  }
+
+  ruckig::Trajectory<7> trajectory;
+  auto result = otg_.calculate(ruckig_input, trajectory);
+  
+  if (result == ruckig::Result::Working || result == ruckig::Result::Finished) {
+      trajectory_buffer_.clear();
+      double duration = trajectory.get_duration();
+      // Sample at 1kHz
+      std::array<double, 7> q_sample;
+      std::array<double, 7> dq_sample;
+      std::array<double, 7> ddq_sample;
+      for (double t = 0.001; t <= duration; t += 0.001) {
+          Waypoint wp;
+          trajectory.at_time(t, q_sample, dq_sample, ddq_sample);
+          for(int i=0; i<7; ++i) { wp.q(i) = q_sample[i]; wp.dq(i) = dq_sample[i]; }
+          trajectory_buffer_.push_back(wp);
+      }
+      // Ensure the final point is included
+      Waypoint final_wp;
+      trajectory.at_time(duration, q_sample, dq_sample, ddq_sample);
+      for(int i=0; i<7; ++i) { final_wp.q(i) = q_sample[i]; final_wp.dq(i) = dq_sample[i]; }
+      trajectory_buffer_.push_back(final_wp);
+
+      current_waypoint_index_ = 0;
+      trajectory_running_ = true;
+      response->success = true;
+      response->message = "Trajectory generated and execution started.";
+  } else {
+      response->success = false;
+      response->message = "Failed to generate trajectory.";
+  }
+}
+
 }  // namespace franka_example_controllers
 #include "pluginlib/class_list_macros.hpp"
 // NOLINTNEXTLINE
-PLUGINLIB_EXPORT_CLASS(franka_example_controllers::JointImpedanceExampleController,
+PLUGINLIB_EXPORT_CLASS(franka_example_controllers::CollisionControllerTorqueRelease,
                        controller_interface::ControllerInterface)

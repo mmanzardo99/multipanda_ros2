@@ -51,6 +51,16 @@ USER root
 RUN mkdir -p $HOME_DIR/Libraries $HOME_DIR/source_code
 WORKDIR $HOME_DIR/source_code
 
+# Install Ruckig
+WORKDIR /tmp
+RUN git clone https://github.com/pantor/ruckig.git && \
+    cd ruckig && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j && \
+    make install
+RUN ldconfig
+
 # MuJoCo 3.2.0
 RUN sudo apt-get update && sudo apt-get install -y \
     libglfw3 libglfw3-dev libgl1-mesa-dev libxinerama-dev libxcursor-dev libxrandr-dev libxi-dev ninja-build zlib1g-dev clang-12 && \

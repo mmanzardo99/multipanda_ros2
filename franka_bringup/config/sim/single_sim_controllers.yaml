@@ -22,8 +22,8 @@ controller_manager:
         type: franka_robot_state_broadcaster/FrankaRobotStateBroadcaster
       franka_robot_model_broadcaster:
         type: franka_robot_state_broadcaster/FrankaRobotModelBroadcaster
-      joint_impedance_example_controller:
-        type: franka_example_controllers/JointImpedanceExampleController
+      collision_controller_torque_release:
+        type: franka_example_controllers/CollisionControllerTorqueRelease
       cartesian_impedance_example_controller:
         type: franka_example_controllers/CartesianImpedanceExampleController
       multi_mode_controller:
@@ -38,7 +38,7 @@ franka_robot_model_broadcaster:
     arm_id: panda
     frequency: 60
 
-joint_impedance_example_controller:
+collision_controller_torque_release:
   ros__parameters:
     arm_id: panda
     k_gains:

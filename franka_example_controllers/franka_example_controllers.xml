@@ -1,7 +1,7 @@
 <library path="franka_example_controllers">
     <!-- Subscriber controllers - They provide a basic subscriber to move the robot to a desired pose. -->
-    <class name="franka_controllers/JointImpedanceController"
-           type="franka_controllers::JointImpedanceController" base_class_type="controller_interface::ControllerInterface">
+    <class name="franka_example_controllers/JointImpedanceController"
+           type="franka_example_controllers::JointImpedanceController" base_class_type="controller_interface::ControllerInterface">
         <description>
             The joint impedance controller subscribes to desired joint position.
         </description>
@@ -26,10 +26,10 @@
             The gravity compensation controller only sends zero torques so that the robot does gravity compensation
         </description>
     </class>
-    <class name="franka_example_controllers/JointImpedanceExampleController"
-           type="franka_example_controllers::JointImpedanceExampleController" base_class_type="controller_interface::ControllerInterface">
+    <class name="franka_example_controllers/CollisionControllerTorqueRelease"
+           type="franka_example_controllers::CollisionControllerTorqueRelease" base_class_type="controller_interface::ControllerInterface">
         <description>
-            The joint impedance example controller moves joint 4 and 5 in a very compliant periodic movement.
+            The CollisionControllerTorqueRelease implements a joint impedance control and accepts joint trajectory goals via a service.
         </description>
     </class>
     <class name="franka_example_controllers/CartesianImpedanceExampleController"

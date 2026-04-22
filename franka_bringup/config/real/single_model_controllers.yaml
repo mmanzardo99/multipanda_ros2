@@ -5,8 +5,8 @@ controller_manager:
     gravity_compensation_example_controller:
       type: franka_example_controllers/GravityCompensationExampleController
 
-    joint_impedance_example_controller:
-      type: franka_example_controllers/JointImpedanceExampleController
+    collision_controller_torque_release:
+      type: franka_example_controllers/CollisionControllerTorqueRelease
     
     cartesian_impedance_example_controller:
       type: franka_example_controllers/CartesianImpedanceExampleController
@@ -79,7 +79,7 @@ cartesian_impedance_example_controller:
   ros__parameters:
     arm_id: panda
 
-joint_impedance_example_controller:
+collision_controller_torque_release:
   ros__parameters:
     arm_id: panda
     k_gains:

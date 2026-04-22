@@ -11,6 +11,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 option(CHECK_TIDY "Adds clang-tidy tests" OFF)
+set(OpenGL_GL_PREFERENCE GLVND)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -24,12 +25,13 @@ find_package(generate_parameter_library)
 find_package(franka_msgs REQUIRED)
 find_package(multi_mode_control_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(ruckig REQUIRED)
 
 add_library(
         ${PROJECT_NAME}
         SHARED
         src/comless/gravity_compensation_example_controller.cpp
-        src/comless/joint_impedance_example_controller.cpp
+        src/comless/collision_controller_torque_release.cpp
         src/comless/cartesian_impedance_example_controller.cpp
         src/comless/move_to_start_example_controller.cpp
         src/comless/joint_position_example_controller.cpp
@@ -61,6 +63,10 @@ ament_target_dependencies(
         franka_semantic_components
         multi_mode_control_msgs
 )
+target_link_libraries(${PROJECT_NAME}
+    ruckig::ruckig
+)
+
 
 generate_parameter_library(franka_example_controllers_parameters src/comless/model_example_controller_parameters.yaml)
 

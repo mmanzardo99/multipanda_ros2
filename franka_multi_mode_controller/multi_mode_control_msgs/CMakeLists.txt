@@ -29,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetReflex.srv"
   "srv/SetThresholds.srv"
   "srv/SetWorldState.srv"
+  "srv/JointCollisionGoal.srv"
   DEPENDENCIES geometry_msgs franka_msgs
 )
 

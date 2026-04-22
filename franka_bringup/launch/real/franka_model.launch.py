@@ -125,6 +125,12 @@ def generate_launch_description():
             output='screen',
             condition=UnlessCondition(use_fake_hardware),
         ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=['collision_controller_torque_release'],
+            output='screen',
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
                 [FindPackageShare('franka_gripper'), 'launch', 'gripper.launch.py'])]),
