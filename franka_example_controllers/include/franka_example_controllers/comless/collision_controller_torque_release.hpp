@@ -49,19 +49,21 @@ class CollisionControllerTorqueRelease : public controller_interface::Controller
   Vector7d d_gains_;
   void updateJointStates();
 
-  Vector7d q_d_;
-  Vector7d dq_d_;
-
   // Ruckig
   ruckig::Ruckig<7> otg_{0.001};
   
   struct Waypoint {
       Vector7d q;
       Vector7d dq;
+      Vector7d ddq;
   };
   std::vector<Waypoint> trajectory_buffer_;
   size_t current_waypoint_index_{0};
   bool trajectory_running_{false};
+
+  Vector7d q_d_;
+  Vector7d dq_d_;
+  Vector7d ddq_d_;
 
   rclcpp::Service<multi_mode_control_msgs::srv::JointCollisionGoal>::SharedPtr goal_service_;
   void goalCallback(const std::shared_ptr<multi_mode_control_msgs::srv::JointCollisionGoal::Request> request,

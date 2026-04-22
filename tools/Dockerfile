@@ -142,6 +142,7 @@ RUN apt-get update -y && apt-get install -y --allow-unauthenticated \
     ros-humble-teleop-twist-keyboard \
     ros-humble-joy \
     ros-humble-teleop-twist-joy \
+    ros-humble-plotjuggler-ros \
     && rm -rf /var/lib/apt/lists/*
 
 # *********************************************************

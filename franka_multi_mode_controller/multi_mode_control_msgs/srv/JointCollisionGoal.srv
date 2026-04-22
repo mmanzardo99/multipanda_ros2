@@ -2,6 +2,9 @@ float64[7] q
 float64[7] dq
 float64[7] qdd
 float64 duration
+float64[7] max_velocity
+float64[7] max_acceleration
+float64[7] max_jerk
 ---
 bool success
 string message

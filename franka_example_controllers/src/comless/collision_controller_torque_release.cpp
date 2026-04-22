@@ -49,9 +49,14 @@ controller_interface::return_type CollisionControllerTorqueRelease::update(
       auto& waypoint = trajectory_buffer_[current_waypoint_index_];
       q_d_ = waypoint.q;
       dq_d_ = waypoint.dq;
+      ddq_d_ = waypoint.ddq;
       current_waypoint_index_++;
       
-      tau_d_calculated = k_gains_.cwiseProduct(q_d_ - q_) + d_gains_.cwiseProduct(dq_d_ - dq_filtered_) + coriolis;
+      // Joint Impedance with Feedforward Acceleration: tau = M * ddq_d + K*(q_d - q) + D*(dq_d - dq) + C
+      auto mass_matrix_array = franka_robot_model_->getMassMatrix();
+      Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(mass_matrix_array.data());
+
+      tau_d_calculated = M * ddq_d_ + k_gains_.cwiseProduct(q_d_ - q_) + d_gains_.cwiseProduct(dq_d_ - dq_filtered_) + coriolis;
     } else {
       trajectory_running_ = false;
       RCLCPP_INFO(get_node()->get_logger(), "Final position reached. Trajectory execution finished.");
@@ -125,6 +130,7 @@ CallbackReturn CollisionControllerTorqueRelease::on_activate(
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   q_d_ = q_;
   dq_d_.setZero();
+  ddq_d_.setZero();
   trajectory_running_ = false;
   return CallbackReturn::SUCCESS;
 }
@@ -162,9 +168,9 @@ void CollisionControllerTorqueRelease::goalCallback(
     ruckig_input.target_velocity[i] = request->dq[i];
     ruckig_input.target_acceleration[i] = request->qdd[i];
 
-    ruckig_input.max_velocity[i] = 2.0;
-    ruckig_input.max_acceleration[i] = 1.0;
-    ruckig_input.max_jerk[i] = 10.0;
+    ruckig_input.max_velocity[i] = (request->max_velocity[i] > 0.0) ? request->max_velocity[i] : 2.0;
+    ruckig_input.max_acceleration[i] = (request->max_acceleration[i] > 0.0) ? request->max_acceleration[i] : 1.0;
+    ruckig_input.max_jerk[i] = (request->max_jerk[i] > 0.0) ? request->max_jerk[i] : 10.0;
   }
 
   if (request->duration > 0.0) {
@@ -185,14 +191,25 @@ void CollisionControllerTorqueRelease::goalCallback(
       for (double t = 0.001; t <= duration; t += 0.001) {
           Waypoint wp;
           trajectory.at_time(t, q_sample, dq_sample, ddq_sample);
-          for(int i=0; i<7; ++i) { wp.q(i) = q_sample[i]; wp.dq(i) = dq_sample[i]; }
+          for(int i=0; i<7; ++i) { 
+              wp.q(i) = q_sample[i]; 
+              wp.dq(i) = dq_sample[i]; 
+              wp.ddq(i) = ddq_sample[i];
+          }
           trajectory_buffer_.push_back(wp);
       }
       // Ensure the final point is included
       Waypoint final_wp;
       trajectory.at_time(duration, q_sample, dq_sample, ddq_sample);
-      for(int i=0; i<7; ++i) { final_wp.q(i) = q_sample[i]; final_wp.dq(i) = dq_sample[i]; }
+      for(int i=0; i<7; ++i) { 
+          final_wp.q(i) = q_sample[i]; 
+          final_wp.dq(i) = dq_sample[i]; 
+          final_wp.ddq(i) = ddq_sample[i];
+      }
       trajectory_buffer_.push_back(final_wp);
+
+      RCLCPP_INFO(get_node()->get_logger(), "Trajectory generated. Requested duration: %.3f, Ruckig duration: %.3f, Waypoints: %ld", 
+                  request->duration, duration, trajectory_buffer_.size());
 
       current_waypoint_index_ = 0;
       trajectory_running_ = true;
