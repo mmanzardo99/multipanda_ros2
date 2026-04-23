@@ -63,9 +63,11 @@ ament_target_dependencies(
         rclcpp_lifecycle
         franka_semantic_components
         multi_mode_control_msgs
+        pinocchio
 )
 target_link_libraries(${PROJECT_NAME}
     ruckig::ruckig
+    pinocchio::pinocchio
 )
 
 

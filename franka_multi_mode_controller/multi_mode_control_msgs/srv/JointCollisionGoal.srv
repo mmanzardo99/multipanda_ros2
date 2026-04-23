@@ -5,6 +5,7 @@ float64 duration
 float64[7] max_velocity
 float64[7] max_acceleration
 float64[7] max_jerk
+float64[3] u
 ---
 bool success
 string message

@@ -82,6 +82,7 @@ cartesian_impedance_example_controller:
 collision_controller_torque_release:
   ros__parameters:
     arm_id: panda
+    robot_description_path: "/home/developer/multipanda_ws/src/franka_description/robots/real/panda_arm.urdf"
     k_gains:
       - 600.0
       - 600.0
