@@ -6,6 +6,8 @@ float64[7] max_velocity
 float64[7] max_acceleration
 float64[7] max_jerk
 float64[3] u
+string link_name
+float64[3] point
 ---
 bool success
 string message

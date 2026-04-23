@@ -84,24 +84,19 @@ class CollisionControllerTorqueRelease : public controller_interface::Controller
   std::string robot_description_path_;
 
   Eigen::Vector3d u_d_;
-  double computeFrankaEffectiveMass(const Eigen::Vector3d& u, bool verbose = false);
+  std::string target_link_name_;
+  Eigen::Vector3d target_point_;
+  double computeEffectiveMass(const pinocchio::Model& model, pinocchio::Data& data, 
+                              const Eigen::VectorXd& q, const Eigen::Vector3d& u, 
+                              const std::string& link_name, const Eigen::Vector3d& point,
+                              bool franka_verbose = false, bool verbose = false);
+
   Matrix7d MassMatrix(const Vector7d& q);
   Vector7d Friction(const Vector7d& dq);
 
   rclcpp::Service<multi_mode_control_msgs::srv::JointCollisionGoal>::SharedPtr goal_service_;
   void goalCallback(const std::shared_ptr<multi_mode_control_msgs::srv::JointCollisionGoal::Request> request,
                     std::shared_ptr<multi_mode_control_msgs::srv::JointCollisionGoal::Response> response);
-
-  struct RobotDynamics {
-    Eigen::MatrixXd M;
-    Eigen::Matrix<double, 6, 7> J;
-    Eigen::Matrix<double, 6, 6> Lambda;
-    double m_eff;
-    double m_eff_chol;
-  };
-
-  RobotDynamics getRobotDynamics(const pinocchio::Model& model, pinocchio::Data& data, 
-                                 const Eigen::VectorXd& q, const Eigen::Vector3d& u, bool verbose = false);
 
   const double  FI_11 = 0.54615;
   const double  FI_12 = 0.87224;

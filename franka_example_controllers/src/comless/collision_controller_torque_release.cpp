@@ -61,10 +61,9 @@ controller_interface::return_type CollisionControllerTorqueRelease::update(
     } else {
       trajectory_running_ = false;
       RCLCPP_INFO(get_node()->get_logger(), "Final position reached. Trajectory execution finished.");
-      computeFrankaEffectiveMass(u_d_, true); 
       Eigen::Map<const Vector7d> q_goal_franka(franka_robot_model_->getRobotState()->q.data());
 
-      getRobotDynamics(model_pin_, data_pin_, q_goal_franka, u_d_, true);
+      computeEffectiveMass(model_pin_, data_pin_, q_goal_franka, u_d_, target_link_name_, target_point_, true, true);
       tau_d_calculated = coriolis + Friction(dq_filtered_);
     }
   } else {
@@ -156,6 +155,8 @@ CallbackReturn CollisionControllerTorqueRelease::on_activate(
   dq_d_.setZero();
   ddq_d_.setZero();
   trajectory_running_ = false;
+  target_link_name_ = "panda_link8";
+  target_point_.setZero();
   return CallbackReturn::SUCCESS;
 }
 
@@ -222,8 +223,11 @@ void CollisionControllerTorqueRelease::goalCallback(
       Eigen::VectorXd q_goal(7);
       for (int i = 0; i < 7; ++i) q_goal(i) = request->q[i];
 
+      target_link_name_ = request->link_name;
+      target_point_ << request->point[0], request->point[1], request->point[2];
+
       RCLCPP_INFO(get_node()->get_logger(), "Pinocchio TARGET computation:");
-      auto pin_goal = getRobotDynamics(model_pin_, data_pin_, q_goal, u_d_, true);
+      computeEffectiveMass(model_pin_, data_pin_, q_goal, u_d_, target_link_name_, target_point_, true, true);
       RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
 
 
@@ -267,107 +271,105 @@ void CollisionControllerTorqueRelease::goalCallback(
   }
 }
 
-CollisionControllerTorqueRelease::RobotDynamics CollisionControllerTorqueRelease::getRobotDynamics(
-    const pinocchio::Model& model, pinocchio::Data& data, const Eigen::VectorXd& q, const Eigen::Vector3d& u, bool verbose) {
+double CollisionControllerTorqueRelease::computeEffectiveMass(
+    const pinocchio::Model& model, pinocchio::Data& data, 
+    const Eigen::VectorXd& q, const Eigen::Vector3d& u, 
+    const std::string& link_name, const Eigen::Vector3d& point,
+    bool franka_verbose, bool verbose) {
   
-  RobotDynamics results;
-  
-  // 1. Mass Matrix
+  // 1. Pinocchio Mass Matrix & Jacobian
   pinocchio::crba(model, data, q);
   data.M.triangularView<Eigen::StrictlyLower>() = data.M.transpose().triangularView<Eigen::StrictlyLower>();
-  results.M = data.M;
+  
+  pinocchio::framesForwardKinematics(model, data, q);
 
-  // 2. Jacobian (at EE)
-  auto frame_id = model.getFrameId("panda_link8");
-  if (frame_id >= model.frames.size()) {
-      frame_id = model.frames.size() - 1;
+  std::string target_link = link_name.empty() ? "panda_link8" : link_name;
+  auto frame_id = model.getFrameId(target_link);
+  if (!model.existFrame(target_link)) {
+      RCLCPP_WARN(get_node()->get_logger(), "Frame '%s' not found, falling back to panda_link8", target_link.c_str());
+      target_link = "panda_link8";
+      frame_id = model.getFrameId(target_link);
+      if (frame_id >= model.frames.size()) {
+          frame_id = model.frames.size() - 1;
+      }
   }
-  results.J.setZero();
-  pinocchio::computeFrameJacobian(model, data, q, frame_id, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, results.J);
-  
-  // 3. Reflected/Effective Mass (Mobility Matrix):
-  // Version 1: Direct Inverse (reference)
-  Eigen::Matrix<double, 6, 6> JMJt_inv = results.J * (results.M.inverse()) * results.J.transpose();
-  
-  // Version 2: Cholesky (stable)
-  Eigen::Matrix<double, 6, 6> JMJt_chol = results.J * results.M.llt().solve(results.J.transpose());
-  results.Lambda = JMJt_chol;
 
-  // 4. Scalar Effective Mass:
-  Eigen::Matrix3d Lambda_pos = results.Lambda.block<3, 3>(0, 0);
-  results.m_eff = 1.0 / (u.transpose() * Lambda_pos * u);
+  Eigen::Matrix<double, 6, 7> J_pin_ee;
+  J_pin_ee.setZero();
+  pinocchio::computeFrameJacobian(model, data, q, frame_id, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J_pin_ee);
+  
+  Eigen::Vector3d p_world = data.oMf[frame_id].rotation() * point;
+  Eigen::Matrix3d p_cross;
+  p_cross << 0, -p_world(2), p_world(1),
+             p_world(2), 0, -p_world(0),
+             -p_world(1), p_world(0), 0;
+             
+  Eigen::Matrix<double, 6, 7> J_pin_pt = J_pin_ee;
+  J_pin_pt.topRows<3>() -= p_cross * J_pin_pt.bottomRows<3>();
+  
+  // Reflected Mass (Pinocchio)
+  Eigen::Matrix<double, 6, 6> JMJt_pin_ee = J_pin_ee * data.M.llt().solve(J_pin_ee.transpose());
+  double m_eff_pin_ee = 1.0 / (u.transpose() * (JMJt_pin_ee.block<3,3>(0,0)) * u);
 
-  // 5. Comparison printed in verbose mode
+  Eigen::Matrix<double, 6, 6> JMJt_pin_pt = J_pin_pt * data.M.llt().solve(J_pin_pt.transpose());
+  double m_eff_pin_pt = 1.0 / (u.transpose() * (JMJt_pin_pt.block<3,3>(0,0)) * u);
+
+  // 2. Gaz 2019 Analytical Mass Matrix
+  Vector7d q_7d;
+  for (int i = 0; i < 7; ++i) q_7d(i) = q(i);
+  Eigen::Matrix<double, 7, 7> M_gaz = MassMatrix(q_7d);
+  
+  // Reflected Mass (Gaz)
+  Eigen::Matrix<double, 6, 6> JMJt_gaz_ee = J_pin_ee * M_gaz.llt().solve(J_pin_ee.transpose());
+  double m_eff_gaz_ee = 1.0 / (u.transpose() * (JMJt_gaz_ee.block<3,3>(0,0)) * u);
+
+  Eigen::Matrix<double, 6, 6> JMJt_gaz_pt = J_pin_pt * M_gaz.llt().solve(J_pin_pt.transpose());
+  double m_eff_gaz_pt = 1.0 / (u.transpose() * (JMJt_gaz_pt.block<3,3>(0,0)) * u);
+
+  // 3. Franka Native Mass Matrix (evaluated at actual configuration if franka_verbose is true)
+  double m_eff_franka_ee = 0.0;
+  double m_eff_franka_pt = 0.0;
+  if (franka_verbose) {
+      auto mass_array = franka_robot_model_->getMassMatrix();
+      Eigen::Map<const Eigen::Matrix<double, 7, 7>> M_franka(mass_array.data());
+      
+      Eigen::Matrix<double, 6, 6> JMJt_franka_ee = J_pin_ee * M_franka.llt().solve(J_pin_ee.transpose());
+      m_eff_franka_ee = 1.0 / (u.transpose() * (JMJt_franka_ee.block<3,3>(0,0)) * u);
+
+      Eigen::Matrix<double, 6, 6> JMJt_franka_pt = J_pin_pt * M_franka.llt().solve(J_pin_pt.transpose());
+      m_eff_franka_pt = 1.0 / (u.transpose() * (JMJt_franka_pt.block<3,3>(0,0)) * u);
+  }
+
+  // 4. Output
   if (verbose) {
-    std::stringstream ss_m, ss_j, ss_l;
-    ss_m << results.M;
-    ss_j << results.J;
-    ss_l << results.Lambda;
-    RCLCPP_INFO(get_node()->get_logger(), "Mass Matrix:\n%s", ss_m.str().c_str());
-    RCLCPP_INFO(get_node()->get_logger(), "Geometric Jacobian:\n%s", ss_j.str().c_str());
-    RCLCPP_INFO(get_node()->get_logger(), "Reflected Mass J*M⁻1*J^T:\n%s", ss_l.str().c_str());
+    RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
+    RCLCPP_INFO(get_node()->get_logger(), "Target Link: %s, Point: [%.3f, %.3f, %.3f]", target_link.c_str(), point(0), point(1), point(2));
     
-    double m_eff_inv = 1.0 / (u.transpose() * JMJt_inv.block<3,3>(0,0) * u);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass (Inverse): %.4f", m_eff_inv);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass (Cholesky): %.4f", results.m_eff);
-  }
+    std::stringstream j_ss;
+    j_ss << "\nJacobian (J_pin_pt):\n" << J_pin_pt;
+    RCLCPP_INFO(get_node()->get_logger(), "%s", j_ss.str().c_str());
+    
+    std::stringstream jmjt_ss;
+    jmjt_ss << "\nReflected Mass Matrix at Point (Translational):\n" << JMJt_pin_pt.block<3,3>(0,0).inverse();
+    RCLCPP_INFO(get_node()->get_logger(), "%s", jmjt_ss.str().c_str());
 
-  return results;
-}
+    RCLCPP_INFO(get_node()->get_logger(), "Effective Mass Comparison at Target Link Origin (EE):");
+    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_ee);
+    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_ee);
+    if (franka_verbose) {
+        RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_ee);
+    }
 
-double CollisionControllerTorqueRelease::computeFrankaEffectiveMass(const Eigen::Vector3d& u, bool verbose) {
-  auto mass_array = franka_robot_model_->getMassMatrix();
-  auto jacobian_array = franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
-  
-  Eigen::Map<const Eigen::Matrix<double, 7, 7>> M(mass_array.data());
-  Eigen::Map<const Eigen::Matrix<double, 6, 7>> J(jacobian_array.data());
-  
-  // Lambda = (J * M⁻1 * J^T)
-  // Version 1: Direct Inverse
-  Eigen::Matrix<double, 6, 6> JMJt_inv = J * (M.inverse()) * J.transpose();
-
-  // Version 2: Cholesky
-  Eigen::Matrix<double, 6, 6> JMJt_chol = J * M.llt().solve(J.transpose());
-  Eigen::Matrix<double, 6, 6> Lambda = JMJt_chol;
-
-  // Scalar Effective Mass: 
-  double m_eff_inv = 1.0 / (u.transpose() * (JMJt_inv.block<3,3>(0,0)) * u);
-  double m_eff_chol = 1.0 / (u.transpose() * (Lambda.block<3,3>(0,0)) * u);
-
-  // Version 3: Gaz et al. (2019) analytical mass matrix + Franka Jacobian (Cholesky)
-  Vector7d q_current;
-  const auto& q_arr = franka_robot_model_->getRobotState()->q;
-  for (int i = 0; i < 7; ++i) q_current(i) = q_arr[i];
-  Eigen::Matrix<double, 7, 7> M_gaz = MassMatrix(q_current);
-  Eigen::Matrix<double, 6, 6> JMJt_gaz = J * M_gaz.llt().solve(J.transpose());
-  double m_eff_gaz = 1.0 / (u.transpose() * (JMJt_gaz.block<3,3>(0,0)) * u);
-
-  if (verbose) {
-    std::stringstream ss_m, ss_j;
-    ss_m << M;
-    ss_j << J;
-    RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
-    RCLCPP_INFO(get_node()->get_logger(), "Effective Mass Comparison (at ACTUAL configuration):");
-    RCLCPP_INFO(get_node()->get_logger(), "Franka Mass Matrix:\n%s", ss_m.str().c_str());
-    RCLCPP_INFO(get_node()->get_logger(), "Franka Jacobian (EE):\n%s", ss_j.str().c_str());
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M, Direct Inverse]:  %.4f kg", m_eff_inv);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M, Cholesky]:        %.4f kg", m_eff_chol);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Gaz 2019 M, Cholesky]:      %.4f kg", m_eff_gaz);
-
-    // Kinetic energy T = 0.5 * dq^T * M * dq  for three test velocity vectors
-    Vector7d dq1; dq1 << 1, 0,  0, 0, 0, 0, 0;
-    Vector7d dq2; dq2 << 1, 0,  1, 0, 0, 0, 0;
-    Vector7d dq3; dq3 << 1, 0, -1, 0, 0, 0, 0;
-    double T1 = 0.5 * dq1.transpose() * M * dq1;
-    double T2 = 0.5 * dq2.transpose() * M * dq2;
-    double T3 = 0.5 * dq3.transpose() * M * dq3;
-    RCLCPP_INFO(get_node()->get_logger(), "Kinetic Energy T = 0.5*dq^T*M*dq (Franka M):");
-    RCLCPP_INFO(get_node()->get_logger(), "  dq=[1,0, 0,0,0,0,0] -> T = %.6f J", T1);
-    RCLCPP_INFO(get_node()->get_logger(), "  dq=[1,0, 1,0,0,0,0] -> T = %.6f J", T2);
-    RCLCPP_INFO(get_node()->get_logger(), "  dq=[1,0,-1,0,0,0,0] -> T = %.6f J", T3);
+    RCLCPP_INFO(get_node()->get_logger(), "Effective Mass Comparison at Specified Point:");
+    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_pt);
+    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_pt);
+    if (franka_verbose) {
+        RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_pt);
+    }
     RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
   }
-  return m_eff_chol;
+
+  return m_eff_pin_pt;
 }
 
 CollisionControllerTorqueRelease::Matrix7d CollisionControllerTorqueRelease::MassMatrix(const Vector7d &q)
