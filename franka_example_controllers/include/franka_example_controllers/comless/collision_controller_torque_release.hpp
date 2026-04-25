@@ -78,6 +78,14 @@ class CollisionControllerTorqueRelease : public controller_interface::Controller
   Vector7d dq_d_;
   Vector7d ddq_d_;
 
+  bool post_impact_measurement_{false};
+  double post_impact_time_{0.0};
+  double t1_measure_{0.005};
+  double t2_measure_{0.015};
+  Vector7d post_impact_q_t1_;
+  bool post_impact_t1_recorded_{false};
+  Eigen::Matrix<double, 6, 7> J_target_post_impact_;
+
   // Pinocchio
   pinocchio::Model model_pin_;
   pinocchio::Data data_pin_;
@@ -89,7 +97,8 @@ class CollisionControllerTorqueRelease : public controller_interface::Controller
   double computeEffectiveMass(const pinocchio::Model& model, pinocchio::Data& data, 
                               const Eigen::VectorXd& q, const Eigen::Vector3d& u, 
                               const std::string& link_name, const Eigen::Vector3d& point,
-                              bool franka_verbose = false, bool verbose = false);
+                              bool franka_verbose = false, bool verbose = false,
+                              Eigen::Matrix<double, 6, 7>* J_out = nullptr);
 
   Matrix7d MassMatrix(const Vector7d& q);
   Vector7d Friction(const Vector7d& dq);

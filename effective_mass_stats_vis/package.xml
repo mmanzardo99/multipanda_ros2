@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>effective_mass_stats_vis</name>
+  <version>0.0.1</version>
+  <description>Package for visualizing generic points for effective mass analysis</description>
+  <maintainer email="user@todo.todo">user</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>pinocchio</depend>
+  <depend>eigen3</depend>
+  <!-- We assume assimp is available -->
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

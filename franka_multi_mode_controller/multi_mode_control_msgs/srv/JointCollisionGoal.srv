@@ -8,6 +8,9 @@ float64[7] max_jerk
 float64[3] u
 string link_name
 float64[3] point
+float64 desired_impact_velocity
+float64 t1_post_impact
+float64 t2_post_impact
 ---
 bool success
 string message
