@@ -30,6 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetThresholds.srv"
   "srv/SetWorldState.srv"
   "srv/JointCollisionGoal.srv"
+  "srv/SolveIK.srv"
   DEPENDENCIES geometry_msgs franka_msgs
 )
 

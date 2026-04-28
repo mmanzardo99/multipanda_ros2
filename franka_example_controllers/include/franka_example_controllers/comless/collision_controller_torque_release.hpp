@@ -98,7 +98,8 @@ class CollisionControllerTorqueRelease : public controller_interface::Controller
                               const Eigen::VectorXd& q, const Eigen::Vector3d& u, 
                               const std::string& link_name, const Eigen::Vector3d& point,
                               bool franka_verbose = false, bool verbose = false,
-                              Eigen::Matrix<double, 6, 7>* J_out = nullptr);
+                              Eigen::Matrix<double, 6, 7>* J_out = nullptr,
+                              const Eigen::VectorXd* dq = nullptr);
 
   Matrix7d MassMatrix(const Vector7d& q);
   Vector7d Friction(const Vector7d& dq);

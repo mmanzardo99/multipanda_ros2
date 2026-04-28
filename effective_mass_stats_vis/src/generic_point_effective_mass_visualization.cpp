@@ -254,6 +254,42 @@ private:
         }
     }
 
+    double computeEffectiveMassAtPoint(
+        const std::string& frame_id, 
+        const Eigen::Vector3d& pt_local, 
+        const Matrix7d& M_inv,
+        const Eigen::Vector3d& u_direction)
+    {
+        if (!model_pin_.existFrame(frame_id)) return 0.0;
+        
+        auto pin_frame_id = model_pin_.getFrameId(frame_id);
+        
+        // Ensure data_pin_ is up to date for this frame
+        // We assume framesForwardKinematics has been called externally
+        
+        Eigen::Matrix<double, 6, 7> J_pin_ee;
+        J_pin_ee.setZero();
+        pinocchio::computeFrameJacobian(model_pin_, data_pin_, q_curr_, pin_frame_id, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J_pin_ee);
+
+        Eigen::Matrix3d R = data_pin_.oMf[pin_frame_id].rotation();
+        Eigen::Vector3d p_world = R * pt_local; // vector from frame origin to point in world frame
+        
+        Eigen::Matrix3d p_cross;
+        p_cross << 0, -p_world(2), p_world(1),
+                    p_world(2), 0, -p_world(0),
+                    -p_world(1), p_world(0), 0;
+
+        Eigen::Matrix<double, 6, 7> J_pin_pt = J_pin_ee;
+        // Shift Jacobian to the specific point: v_pt = v_ee + omega x p = v_ee - p x omega
+        J_pin_pt.topRows<3>() -= p_cross * J_pin_pt.bottomRows<3>();
+
+        Eigen::Matrix<double, 6, 6> JMJt = J_pin_pt * M_inv * J_pin_pt.transpose();
+        double quad_form = u_direction.transpose() * (JMJt.block<3,3>(0,0)) * u_direction;
+        
+        if (std::abs(quad_form) < 1e-9) return 0.0;
+        return 1.0 / quad_form;
+    }
+
     void publishMarkers()
     {
         if (!has_joint_states_ || marker_array_.markers.empty()) return;
@@ -275,31 +311,15 @@ private:
         for (auto& marker : marker_array_.markers) {
             marker.header.stamp = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
             std::string frame_id = marker.header.frame_id;
+            
             if (model_pin_.existFrame(frame_id)) {
-                auto pin_frame_id = model_pin_.getFrameId(frame_id);
-                Eigen::Matrix<double, 6, 7> J_pin_ee;
-                J_pin_ee.setZero();
-                pinocchio::computeFrameJacobian(model_pin_, data_pin_, q_curr_, pin_frame_id, pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, J_pin_ee);
-
-                Eigen::Matrix3d R = data_pin_.oMf[pin_frame_id].rotation();
-
                 std::vector<SampledPoint>& sampled_points = link_sampled_points_[frame_id];
 
                 for (size_t i = 0; i < marker.points.size(); ++i) {
                     auto pt = marker.points[i];
                     Eigen::Vector3d pt_eigen(pt.x, pt.y, pt.z);
-                    Eigen::Vector3d p_world = R * pt_eigen;
                     
-                    Eigen::Matrix3d p_cross;
-                    p_cross << 0, -p_world(2), p_world(1),
-                               p_world(2), 0, -p_world(0),
-                               -p_world(1), p_world(0), 0;
-
-                    Eigen::Matrix<double, 6, 7> J_pin_pt = J_pin_ee;
-                    J_pin_pt.topRows<3>() -= p_cross * J_pin_pt.bottomRows<3>();
-
-                    Eigen::Matrix<double, 6, 6> JMJt_gaz_pt = J_pin_pt * M_gaz_inv * J_pin_pt.transpose();
-                    double m_eff = 1.0 / (u.transpose() * (JMJt_gaz_pt.block<3,3>(0,0)) * u);
+                    double m_eff = computeEffectiveMassAtPoint(frame_id, pt_eigen, M_gaz_inv, u);
 
                     if (i < sampled_points.size()) {
                         sampled_points[i].m_eff = m_eff;
@@ -320,13 +340,23 @@ private:
     {
         if (!has_joint_states_) return;
         
+        // 1. Get latest state
+        std::vector<double> u_d_vec;
+        this->get_parameter("impact_direction", u_d_vec);
+        Eigen::Vector3d u(u_d_vec[0], u_d_vec[1], u_d_vec[2]);
+        if (u.norm() < 1e-6) u << 1.0, 0.0, 0.0;
+        else u.normalize();
+
+        Matrix7d M_gaz_inv = MassMatrix(q_curr_).inverse();
+        pinocchio::framesForwardKinematics(model_pin_, data_pin_, q_curr_);
+
         Eigen::Vector3d clicked_p(msg->point.x, msg->point.y, msg->point.z);
         
         double min_dist_sq = std::numeric_limits<double>::max();
         std::string best_link = "";
         size_t best_idx = 0;
-        Eigen::Vector3d best_point_world;
         
+        // Find closest link and the closest sampled point for normal extraction
         for (const auto& kv : link_sampled_points_) {
             std::string frame_id = kv.first;
             if (!model_pin_.existFrame(frame_id)) continue;
@@ -343,27 +373,32 @@ private:
                     min_dist_sq = dist_sq;
                     best_link = frame_id;
                     best_idx = i;
-                    best_point_world = pt_world;
                 }
             }
         }
         
         if (best_link != "") {
-            const auto& sp = link_sampled_points_[best_link][best_idx];
             auto pin_frame_id = model_pin_.getFrameId(best_link);
             const pinocchio::SE3& oMf = data_pin_.oMf[pin_frame_id];
             
-            Eigen::Vector3d normal_local = sp.normal;
+            // Exact clicked point in local frame
+            Eigen::Vector3d clicked_p_local = oMf.inverse().act(clicked_p);
+            
+            // Compute properties for the EXACT point
+            double m_eff_exact = computeEffectiveMassAtPoint(best_link, clicked_p_local, M_gaz_inv, u);
+            
+            // Use normal from closest sampled point as approximation
+            const auto& sp_closest = link_sampled_points_[best_link][best_idx];
+            Eigen::Vector3d normal_local = sp_closest.normal;
             Eigen::Vector3d normal_world = oMf.rotation() * normal_local;
             
             RCLCPP_INFO(this->get_logger(), "=========================================");
-            RCLCPP_INFO(this->get_logger(), "Clicked Point Matched!");
+            RCLCPP_INFO(this->get_logger(), "Clicked Point Processed (Exact Surface Point)");
             RCLCPP_INFO(this->get_logger(), "Link: %s", best_link.c_str());
-            RCLCPP_INFO(this->get_logger(), "Local Position: [%.4f, %.4f, %.4f]", sp.position.x, sp.position.y, sp.position.z);
-            RCLCPP_INFO(this->get_logger(), "Effective Mass: %.4f kg", sp.m_eff);
-            RCLCPP_INFO(this->get_logger(), "Local Normal:   [%.4f, %.4f, %.4f]", normal_local.x(), normal_local.y(), normal_local.z());
-            RCLCPP_INFO(this->get_logger(), "Base Normal:    [%.4f, %.4f, %.4f]", normal_world.x(), normal_world.y(), normal_world.z());
-            RCLCPP_INFO(this->get_logger(), "Distance to click: %.4f m", std::sqrt(min_dist_sq));
+            RCLCPP_INFO(this->get_logger(), "Exact Local Pos: [%.4f, %.4f, %.4f]", clicked_p_local.x(), clicked_p_local.y(), clicked_p_local.z());
+            RCLCPP_INFO(this->get_logger(), "Effective Mass:  %.4f kg", m_eff_exact);
+            RCLCPP_INFO(this->get_logger(), "Approx Normal:   [%.4f, %.4f, %.4f] (World)", normal_world.x(), normal_world.y(), normal_world.z());
+            RCLCPP_INFO(this->get_logger(), "Distance to mesh: %.4f m", std::sqrt(min_dist_sq));
             RCLCPP_INFO(this->get_logger(), "=========================================");
         }
     }

@@ -1,0 +1,8 @@
+geometry_msgs/Pose target_pose
+float64 q7
+geometry_msgs/Twist cartesian_velocity
+---
+float64[] joint_positions
+float64[] joint_velocities
+bool success
+string message

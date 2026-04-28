@@ -66,7 +66,7 @@ controller_interface::return_type CollisionControllerTorqueRelease::update(
               
               // We keep printing enabled
               Eigen::Map<const Vector7d> q_goal_franka(franka_robot_model_->getRobotState()->q.data());
-              computeEffectiveMass(model_pin_, data_pin_, q_goal_franka, u_d_, target_link_name_, target_point_, true, true);
+              computeEffectiveMass(model_pin_, data_pin_, q_goal_franka, u_d_, target_link_name_, target_point_, true, false);
           }
       } else {
           post_impact_time_ += period.seconds();
@@ -95,13 +95,13 @@ controller_interface::return_type CollisionControllerTorqueRelease::update(
               }
 
               Eigen::Map<const Vector7d> q_goal_franka(franka_robot_model_->getRobotState()->q.data());
-              computeEffectiveMass(model_pin_, data_pin_, q_goal_franka, u_d_, target_link_name_, target_point_, true, true);
+              computeEffectiveMass(model_pin_, data_pin_, q_goal_franka, u_d_, target_link_name_, target_point_, true, false);
           }
       }
-      tau_d_calculated = coriolis + Friction(dq_filtered_);
+      tau_d_calculated.setZero(); //coriolis + Friction(dq_filtered_);
     }
   } else {
-    tau_d_calculated = coriolis + Friction(dq_filtered_);
+    tau_d_calculated.setZero(); //coriolis + Friction(dq_filtered_);
   }
 
   for (int i = 0; i < num_joints; ++i) {
@@ -116,8 +116,6 @@ CallbackReturn CollisionControllerTorqueRelease::on_init() {
     auto_declare<std::vector<double>>("k_gains", {});
     auto_declare<std::vector<double>>("d_gains", {});
     auto_declare<std::string>("robot_description_path", "");
-    auto_declare<double>("t1_post_impact", 0.005);
-    auto_declare<double>("t2_post_impact", 0.015);
 
     goal_service_ = get_node()->create_service<multi_mode_control_msgs::srv::JointCollisionGoal>(
         "~/joint_collision_goal",
@@ -234,13 +232,11 @@ void CollisionControllerTorqueRelease::goalCallback(
   for (int i = 0; i < 7; ++i) q_goal(i) = request->q[i];
 
   Eigen::Matrix<double, 6, 7> J_pin_pt;
-  RCLCPP_INFO(get_node()->get_logger(), "Pinocchio TARGET computation:");
-  computeEffectiveMass(model_pin_, data_pin_, q_goal, u_d_, target_link_name_, target_point_, true, true, &J_pin_pt);
-  RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
+  // Initially just get the Jacobian silently to compute scaling
+  computeEffectiveMass(model_pin_, data_pin_, q_goal, u_d_, target_link_name_, target_point_, false, false, &J_pin_pt);
 
-  // Read t1 and t2 from node parameters dynamically
-  t1_measure_ = get_node()->get_parameter("t1_post_impact").as_double();
-  t2_measure_ = get_node()->get_parameter("t2_post_impact").as_double();
+  t1_measure_ = (request->t1_post_impact > 0.0) ? request->t1_post_impact : 0.005;
+  t2_measure_ = (request->t2_post_impact > 0.0) ? request->t2_post_impact : 0.015;
   post_impact_measurement_ = true;
   post_impact_time_ = 0.0;
   post_impact_t1_recorded_ = false;
@@ -268,6 +264,11 @@ void CollisionControllerTorqueRelease::goalCallback(
           RCLCPP_WARN(get_node()->get_logger(), "Projected cartesian velocity is close to zero, cannot scale. Using original joint velocities.");
       }
   }
+
+  // Now print the consolidated target analysis ONCE
+  Eigen::VectorXd dq_target(7);
+  for (int i = 0; i < 7; ++i) dq_target(i) = request->dq[i] * scale_factor;
+  computeEffectiveMass(model_pin_, data_pin_, q_goal, u_d_, target_link_name_, target_point_, true, true, nullptr, &dq_target);
 
   ruckig::InputParameter<7> ruckig_input;
   for (int i = 0; i < num_joints; ++i) {
@@ -342,7 +343,8 @@ double CollisionControllerTorqueRelease::computeEffectiveMass(
     const Eigen::VectorXd& q, const Eigen::Vector3d& u, 
     const std::string& link_name, const Eigen::Vector3d& point,
     bool franka_verbose, bool verbose,
-    Eigen::Matrix<double, 6, 7>* J_out) {
+    Eigen::Matrix<double, 6, 7>* J_out,
+    const Eigen::VectorXd* dq) {
   
   // 1. Pinocchio Mass Matrix & Jacobian
   pinocchio::crba(model, data, q);
@@ -410,29 +412,43 @@ double CollisionControllerTorqueRelease::computeEffectiveMass(
   // 4. Output
   if (verbose) {
     RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
-    RCLCPP_INFO(get_node()->get_logger(), "Target Link: %s, Point: [%.3f, %.3f, %.3f]", target_link.c_str(), point(0), point(1), point(2));
+    RCLCPP_INFO(get_node()->get_logger(), "TARGET ANALYSIS:");
     
-    // Matrices printing disabled as requested
-    // std::stringstream j_ss;
-    // j_ss << "\nJacobian (J_pin_pt):\n" << J_pin_pt;
-    // RCLCPP_INFO(get_node()->get_logger(), "%s", j_ss.str().c_str());
-    
-    // std::stringstream jmjt_ss;
-    // jmjt_ss << "\nReflected Mass Matrix at Point (Translational):\n" << JMJt_pin_pt.block<3,3>(0,0).inverse();
-    // RCLCPP_INFO(get_node()->get_logger(), "%s", jmjt_ss.str().c_str());
+    std::stringstream q_ss;
+    q_ss << q.transpose();
+    RCLCPP_INFO(get_node()->get_logger(), "Target Configuration [q]: %s", q_ss.str().c_str());
+
+    if (dq) {
+        std::stringstream dq_ss;
+        dq_ss << dq->transpose();
+        RCLCPP_INFO(get_node()->get_logger(), "Target Joint Speed [dq]:  %s", dq_ss.str().c_str());
+
+        Eigen::VectorXd v_ee = J_pin_ee * (*dq);
+        Eigen::VectorXd v_pt = J_pin_pt * (*dq);
+        double v_proj_ee = v_ee.head<3>().dot(u);
+        double v_proj_pt = v_pt.head<3>().dot(u);
+
+        RCLCPP_INFO(get_node()->get_logger(), "Target Cartesian Speed (EE):    Trans: [%.3f, %.3f, %.3f], Rot: [%.3f, %.3f, %.3f], Proj (u): %.4f m/s",
+                    v_ee(0), v_ee(1), v_ee(2), v_ee(3), v_ee(4), v_ee(5), v_proj_ee);
+        RCLCPP_INFO(get_node()->get_logger(), "Target Cartesian Speed (Point): Trans: [%.3f, %.3f, %.3f], Rot: [%.3f, %.3f, %.3f], Proj (u): %.4f m/s",
+                    v_pt(0), v_pt(1), v_pt(2), v_pt(3), v_pt(4), v_pt(5), v_proj_pt);
+    }
+
+    RCLCPP_INFO(get_node()->get_logger(), "Target Link: %s, Direction [u]: [%.2f, %.2f, %.2f], Point offset: [%.3f, %.3f, %.3f]", 
+                target_link.c_str(), u(0), u(1), u(2), point(0), point(1), point(2));
 
     RCLCPP_INFO(get_node()->get_logger(), "Effective Mass Comparison at Target Link Origin (EE):");
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_ee);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_ee);
+    RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_ee);
+    RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_ee);
     if (franka_verbose) {
-        RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_ee);
+        RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_ee);
     }
 
     RCLCPP_INFO(get_node()->get_logger(), "Effective Mass Comparison at Specified Point:");
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_pt);
-    RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_pt);
+    RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Pinocchio M, Pinocchio J]:  %.4f kg", m_eff_pin_pt);
+    RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Gaz 2019 M, Pinocchio J]:   %.4f kg", m_eff_gaz_pt);
     if (franka_verbose) {
-        RCLCPP_INFO(get_node()->get_logger(), "Scalar Effective Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_pt);
+        RCLCPP_INFO(get_node()->get_logger(), "  - Scalar Reflected Mass [Franka M (ACTUAL), Pinocchio J]: %.4f kg", m_eff_franka_pt);
     }
     RCLCPP_INFO(get_node()->get_logger(), "--------------------------------------------------");
   }
